@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/crypto",
+    "crates/protocol",
+    "crates/network",
+    "crates/storage",
+    "crates/chain",
+    "crates/node",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.75"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unwrap_used = "deny"
+

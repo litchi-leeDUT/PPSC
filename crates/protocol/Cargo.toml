@@ -1,0 +1,14 @@
+[package]
+name = "ppsc-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ppsc-core = { path = "../core" }
+ppsc-crypto = { path = "../crypto" }
+
+[lints]
+workspace = true
+

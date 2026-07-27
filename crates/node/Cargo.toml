@@ -1,0 +1,18 @@
+[package]
+name = "ppsc-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ppsc-chain = { path = "../chain" }
+ppsc-core = { path = "../core" }
+ppsc-crypto = { path = "../crypto" }
+ppsc-network = { path = "../network" }
+ppsc-protocol = { path = "../protocol" }
+ppsc-storage = { path = "../storage" }
+
+[lints]
+workspace = true
+
