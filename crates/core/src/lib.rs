@@ -28,6 +28,7 @@ id_type!(ContractId);
 id_type!(ProgramId);
 id_type!(DataId);
 id_type!(ExecutionId);
+id_type!(OwnerId);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtocolVersion {
@@ -48,10 +49,23 @@ pub enum TaskStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConfidentialityMode {
+/// A protected value has exactly one persistent representation.
+pub enum DataRepresentation {
     SecretSharing,
     Homomorphic,
-    Hybrid,
+}
+
+/// Hybrid execution is an operator-level plan, not a third data representation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperatorDomain {
+    Mpc,
+    Fhe,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversionDirection {
+    CiphertextToSharing,
+    SharingToCiphertext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

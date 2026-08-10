@@ -1,7 +1,7 @@
 #![doc = "持久化端口；数据库实现不得记录或打印敏感载荷。"]
 
 use ppsc_core::{
-    CommitteeEpoch, Commitment, ConfidentialityMode, DataId, MessageId, NodeId, PublicBytes,
+    Commitment, CommitteeEpoch, DataId, DataRepresentation, MessageId, NodeId, PublicBytes,
     SecretBytes, TaskId, TaskStatus,
 };
 use ppsc_protocol::{ProtocolMessage, ProtocolTask};
@@ -14,8 +14,7 @@ pub struct StoredTask {
 }
 
 pub trait TaskRepository: Send + Sync {
-    fn insert(&self, task: ProtocolTask)
-        -> impl Future<Output = Result<(), StorageError>> + Send;
+    fn insert(&self, task: ProtocolTask) -> impl Future<Output = Result<(), StorageError>> + Send;
     fn get(
         &self,
         id: TaskId,
@@ -34,10 +33,7 @@ pub trait MessageRepository: Send + Sync {
         &self,
         message: ProtocolMessage,
     ) -> impl Future<Output = Result<bool, StorageError>> + Send;
-    fn contains(
-        &self,
-        id: MessageId,
-    ) -> impl Future<Output = Result<bool, StorageError>> + Send;
+    fn contains(&self, id: MessageId) -> impl Future<Output = Result<bool, StorageError>> + Send;
 }
 
 pub trait SecretStore: Send + Sync {
@@ -54,7 +50,8 @@ pub trait SecretStore: Send + Sync {
 
 pub struct StoredFragment {
     pub data_id: DataId,
-    pub mode: ConfidentialityMode,
+    pub representation: DataRepresentation,
+    pub kind: FragmentKind,
     pub version: u64,
     pub commitment: Commitment,
     pub custodian: NodeId,
@@ -63,11 +60,23 @@ pub struct StoredFragment {
 
 pub struct FragmentMetadata {
     pub data_id: DataId,
-    pub mode: ConfidentialityMode,
+    pub representation: DataRepresentation,
+    pub kind: FragmentKind,
     pub version: u64,
     pub commitment: Commitment,
     pub custodian: NodeId,
     pub epoch: CommitteeEpoch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FragmentKind {
+    ValueShare,
+    FheCiphertext,
+    FheSecretKeyShare,
+    MacKeyShare,
+    MacTagShare,
+    ConversionMask,
+    DegreeReductionPair,
 }
 
 /// 每个节点只处理发给自己的份额或允许复制的密文。

@@ -1,7 +1,7 @@
 #![doc = "密码学能力端口；具体实现必须委托给成熟、经过审计的库。"]
 
 use ppsc_core::{
-    CommitteeEpoch, CommitteeId, Commitment, ExecutionId, NodeId, PublicBytes, SecretBytes,
+    Commitment, CommitteeEpoch, CommitteeId, DataId, ExecutionId, NodeId, PublicBytes, SecretBytes,
     TaskId,
 };
 use std::{error::Error, fmt};
@@ -11,6 +11,24 @@ pub struct Proof(pub PublicBytes);
 pub struct SecretShare(SecretBytes);
 pub struct SortitionProof(pub PublicBytes);
 pub struct HandoffPackage(pub PublicBytes);
+
+pub struct ConversionParameters {
+    pub ring_degree: u32,
+    pub coefficient_modulus: PublicBytes,
+    pub mpc_prime_modulus: PublicBytes,
+    pub fhe_level: u32,
+    pub ciphertext_scale: u64,
+    pub logical_scale: u64,
+    pub value_bound: u64,
+    pub slot_layout_hash: Commitment,
+    pub maximum_decoding_error: PublicBytes,
+}
+
+pub struct CorrelatedConversionMask {
+    pub mask_share: SecretShare,
+    pub mask_ciphertext: Ciphertext,
+    pub correlation_commitment: Commitment,
+}
 
 impl SecretShare {
     pub fn from_secret(bytes: SecretBytes) -> Self {
@@ -52,14 +70,28 @@ pub trait CryptoProvider: Send + Sync {
         program: &[u8],
         inputs: &[Ciphertext],
     ) -> Result<Ciphertext, CryptoError>;
-    fn commit(&self, task_id: TaskId, value: &[u8]) -> Result<Commitment, CryptoError>;
-    fn prove(&self, task_id: TaskId, statement: &[u8]) -> Result<Proof, CryptoError>;
-    fn verify(
+
+    /// C2S: raw decryption, decoding, rounding, range and wrap checks stay inside MPC.
+    fn ciphertext_to_authenticated_sharing(
         &self,
         task_id: TaskId,
-        statement: &[u8],
-        proof: &Proof,
-    ) -> Result<(), CryptoError>;
+        ciphertext: &Ciphertext,
+        key_reference: DataId,
+        parameters: &ConversionParameters,
+    ) -> Result<SecretShare, CryptoError>;
+
+    /// S2C: the correlated mask is one-time and must be consumed atomically.
+    fn authenticated_sharing_to_ciphertext(
+        &self,
+        task_id: TaskId,
+        value: &SecretShare,
+        key_reference: DataId,
+        parameters: &ConversionParameters,
+        mask: CorrelatedConversionMask,
+    ) -> Result<Ciphertext, CryptoError>;
+    fn commit(&self, task_id: TaskId, value: &[u8]) -> Result<Commitment, CryptoError>;
+    fn prove(&self, task_id: TaskId, statement: &[u8]) -> Result<Proof, CryptoError>;
+    fn verify(&self, task_id: TaskId, statement: &[u8], proof: &Proof) -> Result<(), CryptoError>;
 
     /// 使用已承诺的随机种子产生不可伪造的节点入选证明。
     fn prove_sortition(
@@ -109,6 +141,10 @@ pub enum CryptoError {
     VerificationFailed,
     InvalidSortitionProof,
     InvalidHandoff,
+    InvalidConversionParameters,
+    RangeCheckFailed,
+    WraparoundDetected,
+    PreprocessingAlreadyConsumed,
     UnsupportedOperation,
     ProviderFailure,
 }

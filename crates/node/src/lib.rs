@@ -26,7 +26,14 @@ where
     M: MessageRepository,
 {
     pub fn new(chain: C, crypto: K, protocol: P, network: N, tasks: T, messages: M) -> Self {
-        Self { chain, crypto, protocol, network, tasks, messages }
+        Self {
+            chain,
+            crypto,
+            protocol,
+            network,
+            tasks,
+            messages,
+        }
     }
 
     /// 暂为编排入口；事件循环将在适配器选型后实现。
@@ -60,4 +67,3 @@ impl fmt::Display for NodeError {
 }
 
 impl Error for NodeError {}
-

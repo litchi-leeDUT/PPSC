@@ -29,7 +29,8 @@ manifest
 │   ├── selector
 │   ├── program_id
 │   ├── code_hash
-│   ├── allowed_modes: Sharing | HE | Hybrid
+│   ├── operators[]: MPC | FHE
+│   ├── conversions[]: C2S | S2C
 │   ├── input_schema_hash
 │   ├── state_schema_hash
 │   └── resource_limits
@@ -54,7 +55,7 @@ DataDescriptor {
   data_id,
   contract_id,
   owner_commitment,
-  mode,                       // Sharing | HE | Hybrid
+  representation,             // SS | FHE，只有两种持久化表示
   payload_commitment,
   schema_hash,
   encryption_scheme_id,
@@ -76,14 +77,17 @@ DataDescriptor {
 - `payload_commitment` 绑定原值、schema、版本、contract 和 data ID。
 - 节点返回 possession receipt；达到 `availability_threshold` 后链上数据才可转为 `Available`。
 
-### 3.2 同态密文
+### 3.2 同态密文与密钥份额
 
 - 同一密文可复制到多个存储节点；链上登记密文内容哈希和副本集合 root。
 - 评估公钥/evaluation key 可以公开，但必须版本化并绑定 `key_epoch`。
-- HE 私钥由 key committee 通过 DKG 产生或由可信导入流程分享；不得先出现完整私钥再由单节点切分。
-- 解密、bootstrapping/key switching 等需要私钥的操作由 key committee 执行。
+- HE 私钥份额有独立 `dataId` 和 SS `DataReference`，由当前 active committee 持有。
+- active committee 同时负责 FHE/MPC operator、C2S/S2C、密钥份额和授权 Pick；系统不设置独立长期 KMS committee。
+- “无 KMS”不表示没有密钥管理：DKG、份额认证、存储、handoff、Pick 和安全删除都必须实现。
+- FHE ciphertext 可复制；密钥份额不可复制成足以跨节点恢复的集中记录。
+- 一个 FHE ciphertext reference 必须显式绑定 `fhe_key_reference`。同一 key 下所有 ciphertext 共享该 key owner 的释放策略。
 
-建议分离 `compute committee` 与 `key committee`。前者只用公开 evaluation key 计算，后者只执行门限解密或 key switching。若使用同一委员会，协议和审计仍应区分两个角色。
+论文没有给出完整 DKG，因此原型阶段可以把 DKG 定义为外部密码插件，但不得用单节点生成完整私钥后直接分片替代生产协议。
 
 ## 4. 链下存储逻辑
 
@@ -159,7 +163,7 @@ Execution {
   input_root,
   old_state_root,
   current_state_root,
-  mode,
+  operator_sequence_hash,
   protocol_round,
   committee_epoch,
   current_committee_id,
@@ -169,7 +173,42 @@ Execution {
 }
 ```
 
+Hybrid 是 operator sequence 的属性，不是 execution 或数据的第三种表示。每个 operator 明确标记为 `MPC` 或 `FHE`，每条跨域边明确标记 `C2S` 或 `S2C`，并绑定所使用的 FHE key reference。
+
 链上调用不是同步执行私密函数，而是创建异步 execution。只有验证结果后，链上才原子更新状态 root 并触发回调。
+
+### 5.1 Address Registry
+
+论文给出的最小公开引用为：
+
+```text
+Ref_x = (dataId_x, PKSet_x, threshold_x, repr_x, owner_x)
+repr_x ∈ {SS, FHE}
+```
+
+工程实现额外保存 `commitment/version/fheKeyRef`，但这些字段必须被同一 descriptor hash 覆盖：
+
+- SS：`threshold=t` 表示最多 `t` 份额不泄密，打开至少需要 `t+1` 份；`PKSet` 是持有本地份额的 active committee。
+- FHE：`threshold=0`，`PKSet` 是 ciphertext 存储/计算节点；真正门限属于 `fheKeyRef` 指向的 SS key reference。
+- owner：仅用于授权 Pick，不意味着 owner 可以绕过协议读取其他人的值。
+
+### 5.2 Deploy / Upload / Invoke / Pick
+
+```text
+Deploy(contractPackage) -> contractAddr
+Upload(protected value) -> local receipts
+Register(DataReference) -> dataId available
+Invoke(contractAddr, selector, input dataIds, nonce) -> executionId
+RegisterOutput(executionId, output Ref, transcript) -> Completed
+Pick(dataId, recipient, nonce, expiry, owner signature) -> protected shares
+```
+
+- Deploy 不产生以后调用的 input data ID。
+- Invoke 只携带公开 ID，不携带 plaintext、share 或 FHE secret key。
+- 只有协议检查全部成功后才登记输出；失败时 `outputId = ⊥`。
+- Pick 签名必须域分离并绑定 `chainId、registry address、tag、dataId、recipient、nonce、expiry`，防止跨链、跨合约和换收件人重放。
+- SS Pick 返回足够的 result shares；FHE Pick 针对 key reference 返回足够的 key shares，owner 在本地重构 key 并解密 ciphertext。
+- FHE key 一经 Pick，owner 能解密该 key 下所有 ciphertext，因此 key 粒度和 release policy 必须匹配，不能让不同 owner 或不同授权域复用同一 key。
 
 ## 6. Cryptographic sortition
 
@@ -255,6 +294,19 @@ transcript_r = H(
 
 ## 8. 跨委员会交接
 
+论文定义每个 epoch 必须整体迁移的状态：
+
+```text
+State_epoch = (
+  Key,   // FHE secret-key shares
+  Live,  // live authenticated contract-value shares
+  MAC,   // MAC-key and MAC-tag shares
+  Prep   // unused conversion masks and degree-reduction pairs
+)
+```
+
+这四类状态必须由同一 handoff transcript 覆盖。只迁移值份额而漏掉 MAC/preprocessing 会破坏连续性；重复迁移或重复消费 preprocessing 会破坏隐私。
+
 ### 8.1 秘密分享状态
 
 使用 verifiable/proactive resharing：
@@ -270,13 +322,9 @@ transcript_r = H(
 
 ### 8.2 门限 HE 密钥
 
-根据 HE 库支持能力选择：
+按照论文模型，FHE key domain 和公钥在 handoff 前后保持不变，只把同一 secret key 的份额刷新给新 active committee。`dataId`、owner 和复制的 ciphertext 均保持不变；完成后更新 SS/key references 的 `PKSet`。
 
-- 支持 share resharing/refresh：保留公钥，刷新到新 key committee。
-- 支持 threshold key switching：新委员会 DKG 生成新 key，双方联合把密文切换到新公钥。
-- 两者均不支持：当前方案不允许动态 key committee；只能让长期 key committee 保持稳定。
-
-不能假设任意 HE 方案都安全支持密钥份额迁移。该能力必须成为算法插件的显式 capability。
+这要求所选门限 FHE 与 fluid sharing 协议能够安全迁移对应 ring/module 中的 key share。论文明确说明具体 malicious-secure handoff 仍未完成，因此在得到协议和证明前，该能力只能标为实验性，不能作为生产安全声明。
 
 ### 8.3 混合协议转换
 
@@ -290,6 +338,26 @@ Sharing_A → Sharing_B：proactive resharing
 ```
 
 每个 gateway 输出 commitment/proof，并进入 transcript。禁止把 `decrypt()` 作为通用转换捷径。
+
+论文当前真正定义的主路径是：
+
+**C2S（FHE → authenticated SS）**
+
+1. 固定转换层 `Q = q_c`、FHE scale `Δ_c`、逻辑 scale `S`、layout 和范围 `B`。
+2. 委员会以 key shares 计算 raw-decryption polynomial 的份额。
+3. raw polynomial 和 FHE noise 均不得打开。
+4. 在 MPC 内完成 decode、round、range check 和 wrap-around check。
+5. 输出带 MAC 的逻辑值 sharing，并以新 `dataId` 登记 SS reference。
+
+**S2C（authenticated SS → FHE）**
+
+1. preprocessing 生成同一随机 `r` 的 authenticated polynomial sharing 与 ciphertext。
+2. 校验源 sharing 的 MAC 和范围。
+3. 只打开经过 MAC 检查的 `d = m - r mod Q`。
+4. 计算 `ct_m = ct_r + d` 并以新 `dataId` 登记 FHE reference。
+5. correlated mask 必须原子消费且永不复用；复用会暴露两个源值的差。
+
+`Q = q_c` 只对齐 coefficient residues，不等价于逻辑数据域，也不消除 encode/decode、scale、rounding 和 wrap-around 检查。
 
 ## 9. 失败、超时和回滚
 
@@ -307,7 +375,7 @@ Sharing_A → Sharing_B：proactive resharing
 2. 程序 hash 在链上，程序体走内容寻址存储。
 3. 数据位置用 Merkle root，存储节点签名 receipt。
 4. 首先实现秘密分享动态 resharing。
-5. HE 先采用固定 key committee；确认库支持后再开放动态迁移。
+5. active committee 持有 FHE key shares；动态迁移在完成 malicious-secure handoff 前标记为实验性。
 6. sortition 使用链上可验证随机源 + 节点 VRF。
 7. 每轮产生 transcript commitment，只有 checkpoint 确认后才能切换委员会。
 8. 第一版结果用门限签名，后续升级到状态转换证明。
@@ -322,4 +390,20 @@ Sharing_A → Sharing_B：proactive resharing
 - [ ] HE 方案、参数、threshold/key-switching 能力。
 - [ ] 数据副本数、availability threshold、挑战和 slash。
 - [ ] 哪些轮次允许从 Sharing/HE 切换，以及相应证明。
+- [ ] C2S 的 secure decoding、rounding、wrap correction 和 malformed ciphertext 检查。
+- [ ] S2C correlated mask 的一致性生成、持久化和 exactly-once 消费。
+- [ ] FHE key、live values、MAC 和 Prep 的组合式 malicious-secure handoff 证明。
 
+## 12. 论文覆盖范围与工程边界
+
+本文档依据 `main.pdf` 补充了两种持久表示、Address Registry、operator sequence、Pick、C2S/S2C、authenticated MPC、PRSS preprocessing 和四元组 handoff 状态。
+
+论文没有完成以下内容，工程实现不得声称已经由论文证明：
+
+- malicious-secure C2S/S2C 的完整协议和组合证明；
+- malicious-secure fluid handoff 的具体协议；
+- malformed ciphertext、inconsistent key view 和跨 epoch 自适应腐化的完整处理；
+- 性能数据和 Hybrid 相对 all-FHE/static-Hybrid 的收益阈值；
+- cryptographic sortition 的具体 VRF/随机信标构造。
+
+本文第 6 节的 VRF sortition 是项目工程补充，不是论文已经给出的具体协议，必须单独审计。

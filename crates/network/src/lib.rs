@@ -45,4 +45,3 @@ impl fmt::Display for NetworkError {
 }
 
 impl Error for NetworkError {}
-

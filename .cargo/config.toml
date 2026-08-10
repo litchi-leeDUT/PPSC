@@ -1,0 +1,8 @@
+# Workspace-local override for the obsolete USTC git index configured globally
+# on the development machine. Sparse registries are supported by this workspace's
+# minimum Cargo/Rust version and avoid the unavailable legacy endpoint.
+[source.crates-io]
+replace-with = "rsproxy"
+
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"

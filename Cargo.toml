@@ -7,6 +7,7 @@ members = [
     "crates/storage",
     "crates/chain",
     "crates/node",
+    "crates/runtime",
 ]
 resolver = "2"
 
@@ -23,4 +24,3 @@ unsafe_code = "forbid"
 dbg_macro = "deny"
 todo = "warn"
 unwrap_used = "deny"
-

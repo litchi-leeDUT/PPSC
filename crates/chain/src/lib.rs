@@ -1,8 +1,8 @@
 #![doc = "链上合约端口；具体 Solidity ABI/RPC 实现在适配器中。"]
 
 use ppsc_core::{
-    CommitteeEpoch, CommitteeId, Commitment, ConfidentialityMode, ContractId, DataId,
-    ExecutionId, NodeId, ProgramId, PublicBytes, TaskId,
+    Commitment, CommitteeEpoch, CommitteeId, ContractId, DataId, DataRepresentation, ExecutionId,
+    NodeId, OperatorDomain, OwnerId, ProgramId, PublicBytes, TaskId,
 };
 use std::{error::Error, fmt, future::Future};
 
@@ -14,7 +14,12 @@ pub enum ChainEvent {
     DataRegistered {
         data_id: DataId,
         commitment: Commitment,
-        mode: ConfidentialityMode,
+        representation: DataRepresentation,
+    },
+    DataLocationsRegistered {
+        data_id: DataId,
+        storage_nodes: Vec<NodeId>,
+        version: u64,
     },
     TaskRegistered {
         task_id: TaskId,
@@ -44,13 +49,54 @@ pub enum ChainEvent {
 }
 
 /// 链上只保存定位和完整性元数据，不保存秘密份额或解密密钥。
-pub struct DataLocationRecord {
+/// Paper Definition 1: public address-registry entry for one protected value.
+pub struct DataReference {
     pub data_id: DataId,
+    pub owner: OwnerId,
     pub commitment: Commitment,
-    pub mode: ConfidentialityMode,
-    pub storage_set_root: Commitment,
-    pub availability_threshold: u16,
+    pub representation: DataRepresentation,
+    pub public_key_set_root: Commitment,
+    /// SS privacy degree `t`; zero for a replicated FHE ciphertext.
+    pub threshold: u16,
+    /// Required for FHE values; absent for SS values.
+    pub fhe_key_reference: Option<DataId>,
     pub version: u64,
+}
+
+pub struct ContractOperator {
+    pub index: u32,
+    pub opcode: u32,
+    pub domain: OperatorDomain,
+    pub input_schema_hash: Commitment,
+    pub output_schema_hash: Commitment,
+    pub fhe_key_reference: Option<DataId>,
+    pub conversion_parameters_hash: Option<Commitment>,
+}
+
+pub struct InvocationRequest {
+    pub execution_id: ExecutionId,
+    pub contract_id: ContractId,
+    pub program_id: ProgramId,
+    pub function_selector: [u8; 4],
+    pub input_references: Vec<DataId>,
+    pub nonce: u64,
+}
+
+/// Authorized opening request. The signature covers domain, chain, registry,
+/// request tag, data id, recipient, nonce and expiry.
+pub struct PickRequest {
+    pub data_id: DataId,
+    pub recipient: PublicBytes,
+    pub nonce: u64,
+    pub expiry: u64,
+    pub owner_signature: PublicBytes,
+}
+
+pub struct OutputRegistration {
+    pub execution_id: ExecutionId,
+    pub output_reference: DataReference,
+    pub transcript_root: Commitment,
+    pub committee_attestation: PublicBytes,
 }
 
 pub struct ProgramDescriptor {
@@ -67,6 +113,14 @@ pub struct CommitteeSelectionSubmission {
     pub committee_id: CommitteeId,
     pub member_root: Commitment,
     pub aggregate_proof: PublicBytes,
+}
+
+pub struct DataHandoffSubmission {
+    pub data_id: DataId,
+    pub execution_id: ExecutionId,
+    pub new_storage_nodes: Vec<NodeId>,
+    pub new_public_key_set_root: Commitment,
+    pub committee_signatures: Vec<PublicBytes>,
 }
 
 pub struct EventCursor {
@@ -108,10 +162,26 @@ pub trait ChainGateway: Send + Sync {
     fn data_location(
         &self,
         data_id: DataId,
-    ) -> impl Future<Output = Result<DataLocationRecord, ChainError>> + Send;
+    ) -> impl Future<Output = Result<DataReference, ChainError>> + Send;
     fn submit_committee_selection(
         &self,
         selection: CommitteeSelectionSubmission,
+    ) -> impl Future<Output = Result<[u8; 32], ChainError>> + Send;
+    fn invocation(
+        &self,
+        execution_id: ExecutionId,
+    ) -> impl Future<Output = Result<InvocationRequest, ChainError>> + Send;
+    fn register_output(
+        &self,
+        output: OutputRegistration,
+    ) -> impl Future<Output = Result<[u8; 32], ChainError>> + Send;
+    fn pick_request(
+        &self,
+        data_id: DataId,
+    ) -> impl Future<Output = Result<Option<PickRequest>, ChainError>> + Send;
+    fn submit_data_handoff(
+        &self,
+        handoff: DataHandoffSubmission,
     ) -> impl Future<Output = Result<[u8; 32], ChainError>> + Send;
 }
 
