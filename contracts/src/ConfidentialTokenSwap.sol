@@ -41,6 +41,19 @@ contract ConfidentialTokenSwap {
         Cancelled
     }
 
+    enum TransferStatus {
+        None,
+        Pending,
+        Finalized,
+        Cancelled
+    }
+
+    enum OpeningStatus {
+        None,
+        Pending,
+        Fulfilled
+    }
+
     struct TokenConfig {
         bool enabled;
         uint128 minimumDeposit;
@@ -92,6 +105,33 @@ contract ConfidentialTokenSwap {
         bytes32 transcriptRoot;
     }
 
+    struct ConfidentialTransferRequest {
+        address token;
+        address requester;
+        bytes32 senderAccountCommitment;
+        bytes32 receiverAccountCommitment;
+        uint256 amount;
+        uint64 expiry;
+        TransferStatus status;
+    }
+
+    struct ConfidentialTransferSettlement {
+        bytes32 expectedOldStateRoot;
+        bytes32 newStateRoot;
+        bytes32 senderBalanceDataId;
+        bytes32 receiverBalanceDataId;
+        bytes32 transcriptRoot;
+    }
+
+    struct BalanceOpeningRequest {
+        address token;
+        address requester;
+        bytes32 privateAccountCommitment;
+        bytes32 recipientEncryptionKey;
+        uint64 expiry;
+        OpeningStatus status;
+    }
+
     error Unauthorized();
     error Paused();
     error InvalidArgument();
@@ -107,6 +147,12 @@ contract ConfidentialTokenSwap {
         address indexed token, bool enabled, uint128 minimumDeposit, uint16 withdrawalFeeBps
     );
     event CommitteeChanged(bytes32 indexed oldCommitteeId, bytes32 indexed newCommitteeId);
+    event CommitteeHandoffStarted(
+        bytes32 indexed oldCommitteeId, bytes32 indexed nextCommitteeId, bytes32 handoffRoot
+    );
+    event CommitteeHandoffFinalized(
+        bytes32 indexed oldCommitteeId, bytes32 indexed newCommitteeId, bytes32 handoffRoot
+    );
     event DepositRequested(
         bytes32 indexed depositId,
         address indexed token,
@@ -151,8 +197,36 @@ contract ConfidentialTokenSwap {
         bytes32 newStateRoot
     );
     event WithdrawalCancelled(bytes32 indexed withdrawalId, address indexed requester);
+    event ConfidentialTransferRequested(
+        bytes32 indexed transferId,
+        address indexed token,
+        address indexed requester,
+        bytes32 senderAccountCommitment,
+        bytes32 receiverAccountCommitment,
+        uint256 amount,
+        uint64 expiry
+    );
+    event ConfidentialTransferFinalized(
+        bytes32 indexed transferId,
+        address indexed token,
+        bytes32 senderBalanceDataId,
+        bytes32 receiverBalanceDataId,
+        bytes32 newStateRoot
+    );
     event FeesCollected(address indexed token, address indexed recipient, uint256 amount);
     event PauseChanged(bool paused);
+    event TaskGasFunded(bytes32 indexed taskId, address indexed payer, uint256 amount);
+    event GasRefundCredited(bytes32 indexed taskId, address indexed submitter, uint256 amount);
+    event GasRefundClaimed(address indexed submitter, address indexed recipient, uint256 amount);
+    event BalanceOpeningRequested(
+        bytes32 indexed requestId,
+        address indexed token,
+        address indexed requester,
+        bytes32 privateAccountCommitment,
+        bytes32 recipientEncryptionKey,
+        uint64 expiry
+    );
+    event BalanceOpeningFulfilled(bytes32 indexed requestId, bytes encryptedResult);
 
     uint16 public constant MAX_FEE_BPS = 1_000;
     uint64 public constant MIN_REFUND_DELAY = 1 hours;
@@ -160,6 +234,8 @@ contract ConfidentialTokenSwap {
     address public immutable admin;
     IPpscCommitteeRegistry public immutable committeeRegistry;
     bytes32 public activeCommitteeId;
+    bytes32 public pendingCommitteeId;
+    bytes32 public pendingHandoffRoot;
     uint64 public refundDelay;
     bool public paused;
 
@@ -170,9 +246,21 @@ contract ConfidentialTokenSwap {
     mapping(address => uint256) public accruedFees;
     mapping(address => mapping(uint64 => bool)) public depositNonceUsed;
     mapping(address => mapping(uint64 => bool)) public withdrawalNonceUsed;
+    mapping(address => mapping(uint64 => bool)) public transferNonceUsed;
+    mapping(address => mapping(uint64 => bool)) public openingNonceUsed;
     mapping(bytes32 => Deposit) public deposits;
     mapping(bytes32 => WithdrawalRequest) public withdrawalRequests;
+    mapping(bytes32 => ConfidentialTransferRequest) public confidentialTransferRequests;
+    mapping(bytes32 => BalanceOpeningRequest) public balanceOpeningRequests;
+    mapping(bytes32 => bytes) public balanceOpeningResults;
     mapping(bytes32 => bool) public spentNullifiers;
+    mapping(bytes32 => uint256) public taskGasEscrow;
+    mapping(address => uint256) public gasRefundCredits;
+    mapping(bytes32 => address) public confidentialAccountControllers;
+    bytes32[] public depositTaskIds;
+    bytes32[] public transferTaskIds;
+    bytes32[] public withdrawalTaskIds;
+    bytes32[] public openingTaskIds;
 
     uint256 private _reentrancyLock = 1;
 
@@ -231,6 +319,53 @@ contract ConfidentialTokenSwap {
         emit CommitteeChanged(oldCommitteeId, nextCommitteeId);
     }
 
+    function beginCommitteeHandoff(bytes32 nextCommitteeId, bytes32 handoffRoot)
+        external
+        onlyAdmin
+    {
+        if (nextCommitteeId == bytes32(0) || handoffRoot == bytes32(0)) {
+            revert InvalidArgument();
+        }
+        (,,,,, bool active) = committeeRegistry.committees(nextCommitteeId);
+        if (!active || pendingCommitteeId != bytes32(0)) revert InvalidState();
+        pendingCommitteeId = nextCommitteeId;
+        pendingHandoffRoot = handoffRoot;
+        emit CommitteeHandoffStarted(activeCommitteeId, nextCommitteeId, handoffRoot);
+    }
+
+    function committeeHandoffDigest() public view returns (bytes32) {
+        return _ethSigned(
+            keccak256(
+                abi.encode(
+                    "PPSC_SWAP_COMMITTEE_HANDOFF_V1",
+                    block.chainid,
+                    address(this),
+                    activeCommitteeId,
+                    pendingCommitteeId,
+                    pendingHandoffRoot
+                )
+            )
+        );
+    }
+
+    function finalizeCommitteeHandoff(
+        bytes[] calldata oldCommitteeSignatures,
+        bytes[] calldata newCommitteeSignatures
+    ) external {
+        bytes32 nextCommitteeId = pendingCommitteeId;
+        if (nextCommitteeId == bytes32(0)) revert InvalidState();
+        bytes32 digest = committeeHandoffDigest();
+        _verifyCommitteeThreshold(activeCommitteeId, digest, oldCommitteeSignatures);
+        _verifyCommitteeThreshold(nextCommitteeId, digest, newCommitteeSignatures);
+        bytes32 oldCommitteeId = activeCommitteeId;
+        bytes32 handoffRoot = pendingHandoffRoot;
+        activeCommitteeId = nextCommitteeId;
+        pendingCommitteeId = bytes32(0);
+        pendingHandoffRoot = bytes32(0);
+        emit CommitteeHandoffFinalized(oldCommitteeId, nextCommitteeId, handoffRoot);
+        emit CommitteeChanged(oldCommitteeId, nextCommitteeId);
+    }
+
     function setPaused(bool nextPaused) external onlyAdmin {
         paused = nextPaused;
         emit PauseChanged(nextPaused);
@@ -238,6 +373,7 @@ contract ConfidentialTokenSwap {
 
     function deposit(address token, uint256 amount, bytes32 privateAccountCommitment, uint64 nonce)
         external
+        payable
         whenNotPaused
         nonReentrant
         returns (bytes32 depositId)
@@ -250,6 +386,9 @@ contract ConfidentialTokenSwap {
             revert InvalidArgument();
         }
         if (depositNonceUsed[msg.sender][nonce]) revert InvalidState();
+        address controller = confidentialAccountControllers[privateAccountCommitment];
+        if (controller != address(0) && controller != msg.sender) revert Unauthorized();
+        confidentialAccountControllers[privateAccountCommitment] = msg.sender;
         depositNonceUsed[msg.sender][nonce] = true;
 
         depositId = keccak256(
@@ -279,6 +418,9 @@ contract ConfidentialTokenSwap {
             createdAt: uint64(block.timestamp),
             status: DepositStatus.Pending
         });
+        depositTaskIds.push(depositId);
+        taskGasEscrow[depositId] = msg.value;
+        emit TaskGasFunded(depositId, msg.sender, msg.value);
         accountedBalances[token] += amount;
         emit DepositRequested(depositId, token, msg.sender, amount, privateAccountCommitment);
     }
@@ -324,6 +466,7 @@ contract ConfidentialTokenSwap {
         privateStateRoots[target.token] = settlement.newStateRoot;
         privateLiabilities[target.token] += target.amount;
         target.status = DepositStatus.Finalized;
+        _creditTaskGas(depositId, msg.sender);
         emit DepositFinalized(
             depositId,
             target.token,
@@ -340,6 +483,7 @@ contract ConfidentialTokenSwap {
         }
         if (block.timestamp < uint256(target.createdAt) + refundDelay) revert DeadlineExpired();
         target.status = DepositStatus.Cancelled;
+        _returnTaskGas(depositId, target.depositor);
         accountedBalances[target.token] -= target.amount;
         _safeTransfer(target.token, target.depositor, target.amount);
         emit DepositCancelled(depositId, target.depositor, target.amount);
@@ -359,6 +503,116 @@ contract ConfidentialTokenSwap {
         );
     }
 
+    function requestConfidentialTransfer(
+        address token,
+        bytes32 senderAccountCommitment,
+        bytes32 receiverAccountCommitment,
+        uint256 amount,
+        uint64 nonce,
+        uint64 expiry
+    ) external payable whenNotPaused returns (bytes32 transferId) {
+        if (
+            !tokenConfigs[token].enabled || senderAccountCommitment == bytes32(0)
+                || receiverAccountCommitment == bytes32(0)
+                || senderAccountCommitment == receiverAccountCommitment || amount == 0
+                || expiry <= block.timestamp
+        ) revert InvalidArgument();
+        if (
+            confidentialAccountControllers[senderAccountCommitment] != msg.sender
+                || confidentialAccountControllers[receiverAccountCommitment] == address(0)
+        ) revert Unauthorized();
+        if (transferNonceUsed[msg.sender][nonce]) revert InvalidState();
+        transferNonceUsed[msg.sender][nonce] = true;
+        transferId = keccak256(
+            abi.encode(
+                "PPSC_CONFIDENTIAL_TRANSFER_REQUEST_V1",
+                block.chainid,
+                address(this),
+                token,
+                msg.sender,
+                senderAccountCommitment,
+                receiverAccountCommitment,
+                amount,
+                nonce,
+                expiry
+            )
+        );
+        confidentialTransferRequests[transferId] = ConfidentialTransferRequest({
+            token: token,
+            requester: msg.sender,
+            senderAccountCommitment: senderAccountCommitment,
+            receiverAccountCommitment: receiverAccountCommitment,
+            amount: amount,
+            expiry: expiry,
+            status: TransferStatus.Pending
+        });
+        transferTaskIds.push(transferId);
+        taskGasEscrow[transferId] = msg.value;
+        emit TaskGasFunded(transferId, msg.sender, msg.value);
+        emit ConfidentialTransferRequested(
+            transferId,
+            token,
+            msg.sender,
+            senderAccountCommitment,
+            receiverAccountCommitment,
+            amount,
+            expiry
+        );
+    }
+
+    function confidentialTransferDigest(
+        bytes32 transferId,
+        ConfidentialTransferSettlement calldata settlement
+    ) public view returns (bytes32) {
+        ConfidentialTransferRequest storage request = confidentialTransferRequests[transferId];
+        return _ethSigned(
+            keccak256(
+                abi.encode(
+                    "PPSC_CONFIDENTIAL_TRANSFER_SETTLEMENT_V1",
+                    block.chainid,
+                    address(this),
+                    activeCommitteeId,
+                    transferId,
+                    request.token,
+                    request.requester,
+                    request.senderAccountCommitment,
+                    request.receiverAccountCommitment,
+                    request.amount,
+                    request.expiry,
+                    settlement
+                )
+            )
+        );
+    }
+
+    function finalizeConfidentialTransfer(
+        bytes32 transferId,
+        ConfidentialTransferSettlement calldata settlement,
+        bytes[] calldata signatures
+    ) external whenNotPaused {
+        ConfidentialTransferRequest storage request = confidentialTransferRequests[transferId];
+        if (request.status != TransferStatus.Pending) revert InvalidState();
+        if (block.timestamp > request.expiry) revert DeadlineExpired();
+        if (
+            settlement.expectedOldStateRoot != privateStateRoots[request.token]
+                || settlement.newStateRoot == bytes32(0)
+                || settlement.senderBalanceDataId == bytes32(0)
+                || settlement.receiverBalanceDataId == bytes32(0)
+                || settlement.transcriptRoot == bytes32(0)
+        ) revert InvalidArgument();
+        _verifyThreshold(confidentialTransferDigest(transferId, settlement), signatures);
+        request.status = TransferStatus.Finalized;
+        _creditTaskGas(transferId, msg.sender);
+        privateStateRoots[request.token] = settlement.newStateRoot;
+        emit ConfidentialTransferFinalized(
+            transferId,
+            request.token,
+            settlement.senderBalanceDataId,
+            settlement.receiverBalanceDataId,
+            settlement.newStateRoot
+        );
+    }
+
     /// @notice Creates an on-chain task that asks Runtime to verify and debit a confidential balance.
     /// @dev The amount is intentionally public. The commitment identifies the off-chain account
     /// without publishing its balance or ciphertext.
@@ -369,7 +623,7 @@ contract ConfidentialTokenSwap {
         address recipient,
         uint64 nonce,
         uint64 expiry
-    ) external whenNotPaused returns (bytes32 withdrawalId) {
+    ) external payable whenNotPaused returns (bytes32 withdrawalId) {
         TokenConfig memory config = tokenConfigs[token];
         if (
             !config.enabled || grossAmount == 0 || privateAccountCommitment == bytes32(0)
@@ -403,6 +657,9 @@ contract ConfidentialTokenSwap {
             expiry: expiry,
             status: WithdrawalStatus.Pending
         });
+        withdrawalTaskIds.push(withdrawalId);
+        taskGasEscrow[withdrawalId] = msg.value;
+        emit TaskGasFunded(withdrawalId, msg.sender, msg.value);
         emit WithdrawalRequested(
             withdrawalId,
             token,
@@ -461,6 +718,7 @@ contract ConfidentialTokenSwap {
         _verifyThreshold(withdrawalSettlementDigest(withdrawalId, settlement), signatures);
         spentNullifiers[settlement.nullifier] = true;
         request.status = WithdrawalStatus.Finalized;
+        _creditTaskGas(withdrawalId, msg.sender);
         privateStateRoots[request.token] = settlement.newStateRoot;
         privateLiabilities[request.token] -= request.grossAmount;
 
@@ -489,6 +747,7 @@ contract ConfidentialTokenSwap {
                 || block.timestamp <= request.expiry
         ) revert InvalidState();
         request.status = WithdrawalStatus.Cancelled;
+        _returnTaskGas(withdrawalId, msg.sender);
         emit WithdrawalCancelled(withdrawalId, msg.sender);
     }
 
@@ -544,21 +803,165 @@ contract ConfidentialTokenSwap {
         emit FeesCollected(token, recipient, amount);
     }
 
+    function requestBalanceOpening(
+        address token,
+        bytes32 privateAccountCommitment,
+        bytes32 recipientEncryptionKey,
+        uint64 nonce,
+        uint64 expiry
+    ) external payable whenNotPaused returns (bytes32 requestId) {
+        if (
+            !tokenConfigs[token].enabled || privateAccountCommitment == bytes32(0)
+                || recipientEncryptionKey == bytes32(0) || expiry <= block.timestamp
+                || openingNonceUsed[msg.sender][nonce]
+        ) revert InvalidArgument();
+        if (confidentialAccountControllers[privateAccountCommitment] != msg.sender) {
+            revert Unauthorized();
+        }
+        openingNonceUsed[msg.sender][nonce] = true;
+        requestId = keccak256(
+            abi.encode(
+                "PPSC_BALANCE_OPENING_REQUEST_V1",
+                block.chainid,
+                address(this),
+                token,
+                msg.sender,
+                privateAccountCommitment,
+                recipientEncryptionKey,
+                nonce,
+                expiry
+            )
+        );
+        balanceOpeningRequests[requestId] = BalanceOpeningRequest({
+            token: token,
+            requester: msg.sender,
+            privateAccountCommitment: privateAccountCommitment,
+            recipientEncryptionKey: recipientEncryptionKey,
+            expiry: expiry,
+            status: OpeningStatus.Pending
+        });
+        openingTaskIds.push(requestId);
+        taskGasEscrow[requestId] = msg.value;
+        emit TaskGasFunded(requestId, msg.sender, msg.value);
+        emit BalanceOpeningRequested(
+            requestId, token, msg.sender, privateAccountCommitment, recipientEncryptionKey, expiry
+        );
+    }
+
+    function registerConfidentialAccount(bytes32 privateAccountCommitment) external {
+        if (privateAccountCommitment == bytes32(0)) revert InvalidArgument();
+        address controller = confidentialAccountControllers[privateAccountCommitment];
+        if (controller != address(0) && controller != msg.sender) revert Unauthorized();
+        confidentialAccountControllers[privateAccountCommitment] = msg.sender;
+    }
+
+    function balanceOpeningDigest(bytes32 requestId, bytes calldata encryptedResult)
+        public
+        view
+        returns (bytes32)
+    {
+        BalanceOpeningRequest storage request = balanceOpeningRequests[requestId];
+        return _ethSigned(
+            keccak256(
+                abi.encode(
+                    "PPSC_BALANCE_OPENING_RESULT_V1",
+                    block.chainid,
+                    address(this),
+                    activeCommitteeId,
+                    requestId,
+                    request.token,
+                    request.requester,
+                    request.privateAccountCommitment,
+                    request.recipientEncryptionKey,
+                    request.expiry,
+                    keccak256(encryptedResult)
+                )
+            )
+        );
+    }
+
+    function fulfillBalanceOpening(
+        bytes32 requestId,
+        bytes calldata encryptedResult,
+        bytes[] calldata signatures
+    ) external {
+        BalanceOpeningRequest storage request = balanceOpeningRequests[requestId];
+        if (
+            request.status != OpeningStatus.Pending || block.timestamp > request.expiry
+                || encryptedResult.length == 0
+        ) revert InvalidState();
+        _verifyThreshold(balanceOpeningDigest(requestId, encryptedResult), signatures);
+        request.status = OpeningStatus.Fulfilled;
+        balanceOpeningResults[requestId] = encryptedResult;
+        _creditTaskGas(requestId, msg.sender);
+        emit BalanceOpeningFulfilled(requestId, encryptedResult);
+    }
+
     function reserveIsSolvent(address token) external view returns (bool) {
         uint256 balance = IERC20Minimal(token).balanceOf(address(this));
         return balance >= accountedBalances[token] && balance >= privateLiabilities[token];
     }
 
+    function claimGasRefund(address payable recipient) external nonReentrant {
+        uint256 amount = gasRefundCredits[msg.sender];
+        if (recipient == address(0) || amount == 0) revert InvalidArgument();
+        gasRefundCredits[msg.sender] = 0;
+        (bool success,) = recipient.call{ value: amount }("");
+        if (!success) revert TokenTransferFailed();
+        emit GasRefundClaimed(msg.sender, recipient, amount);
+    }
+
+    function _creditTaskGas(bytes32 taskId, address submitter) private {
+        uint256 amount = taskGasEscrow[taskId];
+        if (amount == 0) return;
+        taskGasEscrow[taskId] = 0;
+        gasRefundCredits[submitter] += amount;
+        emit GasRefundCredited(taskId, submitter, amount);
+    }
+
+    function _returnTaskGas(bytes32 taskId, address payer) private {
+        uint256 amount = taskGasEscrow[taskId];
+        if (amount == 0) return;
+        taskGasEscrow[taskId] = 0;
+        gasRefundCredits[payer] += amount;
+        emit GasRefundCredited(taskId, payer, amount);
+    }
+
+    function taskCounts()
+        external
+        view
+        returns (
+            uint256 depositsCount,
+            uint256 transfersCount,
+            uint256 withdrawalsCount,
+            uint256 openingsCount
+        )
+    {
+        return (
+            depositTaskIds.length,
+            transferTaskIds.length,
+            withdrawalTaskIds.length,
+            openingTaskIds.length
+        );
+    }
+
     function _verifyThreshold(bytes32 digest, bytes[] calldata signatures) private view {
-        (, uint16 threshold,,,, bool active) = committeeRegistry.committees(activeCommitteeId);
+        _verifyCommitteeThreshold(activeCommitteeId, digest, signatures);
+    }
+
+    function _verifyCommitteeThreshold(
+        bytes32 committeeId,
+        bytes32 digest,
+        bytes[] calldata signatures
+    ) private view {
+        (, uint16 threshold,,,, bool active) = committeeRegistry.committees(committeeId);
         if (!active || threshold == 0 || signatures.length < threshold) revert InvalidThreshold();
         address previous;
         for (uint256 i; i < signatures.length; ++i) {
             address signer = _recover(digest, signatures[i]);
-            if (
-                signer <= previous
-                    || !committeeRegistry.isCommitteeMember(activeCommitteeId, signer)
-            ) revert InvalidSignature();
+            if (signer <= previous || !committeeRegistry.isCommitteeMember(committeeId, signer)) {
+                revert InvalidSignature();
+            }
             previous = signer;
         }
     }

@@ -3,7 +3,8 @@
 
 use super::{
     AssetId, BalanceRuntimeApi, ConfidentialBackend, DepositCommand, EncryptedBalanceView,
-    FheAmount, PrivateAccountId, RuntimeError, StateTransition, WithdrawalCommand,
+    FheAmount, PrivateAccountId, RuntimeError, StateTransition, TransferCommand,
+    TransferTransition, WithdrawalCommand,
 };
 use postgres::{Client, NoTls, Transaction};
 use ppsc_core::{Commitment, DataId, PublicBytes};
@@ -375,6 +376,101 @@ where
                 encrypted_balance_data_id: data_id,
                 transcript_root,
                 version,
+            })
+        })
+    }
+
+    fn transfer(&self, command: TransferCommand) -> Result<TransferTransition, RuntimeError> {
+        if command.amount == 0 || command.sender == command.receiver {
+            return Err(RuntimeError::InvalidAmount);
+        }
+        self.repository.transaction(|transaction| {
+            let old_root = Self::locked_root(transaction)?;
+            if old_root != command.expected_old_state_root {
+                return Err(RuntimeError::StaleStateRoot);
+            }
+            if Self::marker_exists(
+                transaction,
+                "ppsc_processed_transfers",
+                "transfer_id",
+                &command.transfer_id,
+            )? {
+                return Err(RuntimeError::NullifierAlreadySpent);
+            }
+            let (sender_ciphertext, sender_version) =
+                Self::current_balance(transaction, command.sender, command.asset)?
+                    .ok_or(RuntimeError::BalanceNotFound)?;
+            let receiver_current =
+                Self::current_balance(transaction, command.receiver, command.asset)?;
+            let sender_secret = self.backend.fhe_to_mpc(&sender_ciphertext)?;
+            let receiver_secret = match &receiver_current {
+                Some((ciphertext, _)) => self.backend.fhe_to_mpc(ciphertext)?,
+                None => self.backend.share_amount(0)?,
+            };
+            let amount = self.backend.share_amount(command.amount)?;
+            if !self.backend.greater_than_or_equal(&sender_secret, &amount)? {
+                return Err(RuntimeError::InsufficientBalance);
+            }
+            let sender_next = self.backend.checked_sub(&sender_secret, &amount)?;
+            let receiver_next = self.backend.checked_add(&receiver_secret, &amount)?;
+            let sender_version = sender_version
+                .checked_add(1)
+                .ok_or(RuntimeError::CorruptPersistence)?;
+            let receiver_version = receiver_current
+                .as_ref()
+                .map_or(1, |(_, version)| version.saturating_add(1));
+            let sender_output =
+                self.backend.mpc_to_fhe(&sender_next, command.sender, command.asset)?;
+            let receiver_output =
+                self.backend.mpc_to_fhe(&receiver_next, command.receiver, command.asset)?;
+            let (sender_data_id, intermediate_root, _) = self.derive_transition(
+                old_root,
+                command.sender,
+                command.asset,
+                &sender_output,
+                sender_version,
+            );
+            let (receiver_data_id, new_root, transcript_root) = self.derive_transition(
+                intermediate_root,
+                command.receiver,
+                command.asset,
+                &receiver_output,
+                receiver_version,
+            );
+            for (account, data_id, version, ciphertext) in [
+                (command.sender, sender_data_id, sender_version, &sender_output),
+                (command.receiver, receiver_data_id, receiver_version, &receiver_output),
+            ] {
+                let version =
+                    i64::try_from(version).map_err(|_| RuntimeError::CorruptPersistence)?;
+                transaction.execute(
+                    "INSERT INTO ppsc_balance_records \
+                     (account_id,asset_id,data_id,version,ciphertext) VALUES($1,$2,$3,$4,$5) \
+                     ON CONFLICT(account_id,asset_id) DO UPDATE SET data_id=EXCLUDED.data_id, \
+                     version=EXCLUDED.version,ciphertext=EXCLUDED.ciphertext,updated_at=now()",
+                    &[&account.as_bytes().as_slice(), &command.asset.as_bytes().as_slice(),
+                      &data_id.as_bytes().as_slice(), &version, &ciphertext.as_bytes()],
+                ).map_err(db_error)?;
+            }
+            transaction.execute(
+                "INSERT INTO ppsc_processed_transfers \
+                 (transfer_id,sender_account_id,receiver_account_id,asset_id,amount_be,resulting_state_root) \
+                 VALUES($1,$2,$3,$4,$5,$6)",
+                &[&command.transfer_id.as_slice(), &command.sender.as_bytes().as_slice(),
+                  &command.receiver.as_bytes().as_slice(), &command.asset.as_bytes().as_slice(),
+                  &command.amount.to_be_bytes().as_slice(), &new_root.as_bytes().as_slice()],
+            ).map_err(db_error)?;
+            transaction.execute(
+                "UPDATE ppsc_runtime_meta SET state_root=$1,updated_at=now() WHERE singleton=TRUE",
+                &[&new_root.as_bytes().as_slice()],
+            ).map_err(db_error)?;
+            Ok(TransferTransition {
+                new_state_root: new_root,
+                sender_data_id,
+                receiver_data_id,
+                transcript_root,
+                sender_version,
+                receiver_version,
             })
         })
     }

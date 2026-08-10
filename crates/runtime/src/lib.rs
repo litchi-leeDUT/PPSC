@@ -290,6 +290,24 @@ pub struct WithdrawalCommand {
     pub expected_old_state_root: Commitment,
 }
 
+pub struct TransferCommand {
+    pub transfer_id: [u8; 32],
+    pub sender: PrivateAccountId,
+    pub receiver: PrivateAccountId,
+    pub asset: AssetId,
+    pub amount: u128,
+    pub expected_old_state_root: Commitment,
+}
+
+pub struct TransferTransition {
+    pub new_state_root: Commitment,
+    pub sender_data_id: DataId,
+    pub receiver_data_id: DataId,
+    pub transcript_root: Commitment,
+    pub sender_version: u64,
+    pub receiver_version: u64,
+}
+
 pub struct StateTransition {
     pub new_state_root: Commitment,
     pub encrypted_balance_data_id: DataId,
@@ -315,6 +333,7 @@ struct RuntimeState {
     balances: BTreeMap<(PrivateAccountId, AssetId), BalanceRecord>,
     processed_deposits: BTreeSet<[u8; 32]>,
     spent_nullifiers: BTreeSet<[u8; 32]>,
+    processed_transfers: BTreeSet<[u8; 32]>,
 }
 
 impl Default for RuntimeState {
@@ -324,6 +343,7 @@ impl Default for RuntimeState {
             balances: BTreeMap::new(),
             processed_deposits: BTreeSet::new(),
             spent_nullifiers: BTreeSet::new(),
+            processed_transfers: BTreeSet::new(),
         }
     }
 }
@@ -332,6 +352,7 @@ pub trait BalanceRuntimeApi {
     fn credit_deposit(&self, command: DepositCommand) -> Result<StateTransition, RuntimeError>;
     fn debit_withdrawal(&self, command: WithdrawalCommand)
         -> Result<StateTransition, RuntimeError>;
+    fn transfer(&self, command: TransferCommand) -> Result<TransferTransition, RuntimeError>;
     fn encrypted_balance(
         &self,
         account: PrivateAccountId,
@@ -516,6 +537,79 @@ where
             encrypted_balance_data_id: data_id,
             transcript_root,
             version,
+        })
+    }
+
+    fn transfer(&self, command: TransferCommand) -> Result<TransferTransition, RuntimeError> {
+        if command.amount == 0 || command.sender == command.receiver {
+            return Err(RuntimeError::InvalidAmount);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if state.state_root != command.expected_old_state_root {
+            return Err(RuntimeError::StaleStateRoot);
+        }
+        if state.processed_transfers.contains(&command.transfer_id) {
+            return Err(RuntimeError::NullifierAlreadySpent);
+        }
+        let sender_key = (command.sender, command.asset);
+        let receiver_key = (command.receiver, command.asset);
+        let sender = state
+            .balances
+            .get(&sender_key)
+            .ok_or(RuntimeError::BalanceNotFound)?;
+        let sender_secret = self.backend.fhe_to_mpc(&sender.ciphertext)?;
+        let receiver_current = state.balances.get(&receiver_key);
+        let receiver_secret = match receiver_current {
+            Some(value) => self.backend.fhe_to_mpc(&value.ciphertext)?,
+            None => self.backend.share_amount(0)?,
+        };
+        let amount = self.backend.share_amount(command.amount)?;
+        if !self
+            .backend
+            .greater_than_or_equal(&sender_secret, &amount)?
+        {
+            return Err(RuntimeError::InsufficientBalance);
+        }
+        let sender_next = self.backend.checked_sub(&sender_secret, &amount)?;
+        let receiver_next = self.backend.checked_add(&receiver_secret, &amount)?;
+        let sender_version = sender.version + 1;
+        let receiver_version = receiver_current.map_or(1, |value| value.version + 1);
+        let sender_ciphertext =
+            self.backend
+                .mpc_to_fhe(&sender_next, command.sender, command.asset)?;
+        let receiver_ciphertext =
+            self.backend
+                .mpc_to_fhe(&receiver_next, command.receiver, command.asset)?;
+        let (sender_record, intermediate_root, _) = self.next_record(
+            state.state_root,
+            command.sender,
+            command.asset,
+            sender_ciphertext,
+            sender_version,
+        );
+        let (receiver_record, new_root, transcript_root) = self.next_record(
+            intermediate_root,
+            command.receiver,
+            command.asset,
+            receiver_ciphertext,
+            receiver_version,
+        );
+        let sender_data_id = sender_record.data_id;
+        let receiver_data_id = receiver_record.data_id;
+        state.balances.insert(sender_key, sender_record);
+        state.balances.insert(receiver_key, receiver_record);
+        state.processed_transfers.insert(command.transfer_id);
+        state.state_root = new_root;
+        Ok(TransferTransition {
+            new_state_root: new_root,
+            sender_data_id,
+            receiver_data_id,
+            transcript_root,
+            sender_version,
+            receiver_version,
         })
     }
 

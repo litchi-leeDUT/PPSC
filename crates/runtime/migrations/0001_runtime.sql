@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS ppsc_spent_nullifiers (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS ppsc_processed_transfers (
+    transfer_id BYTEA PRIMARY KEY CHECK (octet_length(transfer_id) = 32),
+    sender_account_id BYTEA NOT NULL CHECK (octet_length(sender_account_id) = 32),
+    receiver_account_id BYTEA NOT NULL CHECK (octet_length(receiver_account_id) = 32),
+    asset_id BYTEA NOT NULL CHECK (octet_length(asset_id) = 20),
+    amount_be BYTEA NOT NULL CHECK (octet_length(amount_be) = 16),
+    resulting_state_root BYTEA NOT NULL CHECK (octet_length(resulting_state_root) = 32),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS ppsc_state_transitions (
     sequence BIGSERIAL PRIMARY KEY,
     operation_kind TEXT NOT NULL CHECK (operation_kind IN ('deposit', 'withdrawal')),

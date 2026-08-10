@@ -332,7 +332,7 @@ export no_proxy=127.0.0.1,localhost
 export RPC_URL='http://127.0.0.1:8545'
 export DATABASE_URL='postgres://ppsc:ppsc_dev_only@127.0.0.1:5432/ppsc_swap_demo'
 export USER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-export RELAYER_KEY="$USER_KEY"
+export NODE_TX_KEY=0x0000000000000000000000000000000000000000000000000000000000000b0b
 export DEMO_USER=$(cast wallet address --private-key "$USER_KEY")
 
 cast block-number --rpc-url "$RPC_URL" --no-proxy
@@ -644,7 +644,7 @@ true
 `missing environment variable ...`：所有 `export` 必须和 `cargo run` 在同一个终端执行：
 
 ```bash
-printenv DATABASE_URL RPC_URL SWAP TOKEN RELAYER_KEY
+printenv DATABASE_URL RPC_URL SWAP TOKEN NODE_TX_KEY
 ```
 
 `HTTP error 502 with empty body`：清除代理变量，然后重试：

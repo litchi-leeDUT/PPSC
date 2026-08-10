@@ -1,6 +1,5 @@
 # Privacy-Preserving Smart Contract Node
 
-这是 `project.md` 所描述系统的 Rust 链下节点框架。当前阶段只定义模块边界、核心领域类型和接口，不包含具体密码学原语、链合约或网络实现。
 
 ## Workspace
 
@@ -28,6 +27,9 @@ Rust 执行状态机、MPC/FHE 端口和明文开发后端见
 [Runtime 接口与明文开发后端](docs/runtime.md)。
 SS/FHE 上传、节点选择、handoff、计算和链上位置更新见
 [存储与 Handoff 流程](docs/storage-handoff-workflow.md)。
+
+从零开始运行同一条本地链上的完整演示（密态条件转账、明文代币存款、密态余额查询和提款），见
+[PPSC 完整端到端演示](docs/README-complete-confidential-demo.md)。
 
 一键验证该完整流程：
 

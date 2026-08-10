@@ -13,6 +13,7 @@ interface SwapVm {
         returns (uint8 v, bytes32 r, bytes32 s);
     function prank(address sender) external;
     function warp(uint256 timestamp) external;
+    function deal(address account, uint256 balance) external;
     function expectRevert(bytes4 selector) external;
 }
 
@@ -55,6 +56,7 @@ contract ConfidentialTokenSwapTest {
         token.mint(user, 1_000 ether);
         vm.prank(user);
         token.approve(address(swap), type(uint256).max);
+        vm.deal(user, 10 ether);
     }
 
     function testPublicDepositThenPrivateWithdrawal() public {
@@ -141,6 +143,74 @@ contract ConfidentialTokenSwapTest {
 
         vm.expectRevert(ConfidentialTokenSwap.InvalidThreshold.selector);
         swap.finalizeDeposit(depositId, settlement, signatures);
+    }
+
+    function testUserPrepaidGasIsCreditedOnlyAfterValidSettlement() public {
+        vm.prank(user);
+        bytes32 depositId = swap.deposit{ value: 0.01 ether }(
+            address(token), 10 ether, keccak256("gas-funded-account"), 44
+        );
+        require(swap.taskGasEscrow(depositId) == 0.01 ether, "escrow missing");
+        ConfidentialTokenSwap.DepositSettlement memory settlement =
+            ConfidentialTokenSwap.DepositSettlement({
+                expectedOldStateRoot: bytes32(0),
+                newStateRoot: keccak256("gas-state"),
+                encryptedBalanceDataId: keccak256("gas-ciphertext"),
+                transcriptRoot: keccak256("gas-transcript")
+            });
+        swap.finalizeDeposit(
+            depositId, settlement, _memberSignatures(swap.depositDigest(depositId, settlement))
+        );
+        require(swap.taskGasEscrow(depositId) == 0, "escrow not consumed");
+        require(swap.gasRefundCredits(address(this)) == 0.01 ether, "submitter not credited");
+    }
+
+    function testConfidentialTransferAdvancesRootWithoutChangingLiability() public {
+        bytes32 senderAccount = keccak256("sender-private-account");
+        bytes32 receiverAccount = keccak256("receiver-private-account");
+        vm.prank(user);
+        bytes32 depositId = swap.deposit(address(token), 100 ether, senderAccount, 9);
+        ConfidentialTokenSwap.DepositSettlement memory depositSettlement =
+            ConfidentialTokenSwap.DepositSettlement({
+                expectedOldStateRoot: bytes32(0),
+                newStateRoot: keccak256("deposit-root"),
+                encryptedBalanceDataId: keccak256("sender-ciphertext"),
+                transcriptRoot: keccak256("deposit-transcript")
+            });
+        swap.finalizeDeposit(
+            depositId,
+            depositSettlement,
+            _memberSignatures(swap.depositDigest(depositId, depositSettlement))
+        );
+        vm.prank(user);
+        swap.registerConfidentialAccount(receiverAccount);
+        vm.prank(user);
+        bytes32 transferId = swap.requestConfidentialTransfer(
+            address(token),
+            senderAccount,
+            receiverAccount,
+            30 ether,
+            1,
+            uint64(block.timestamp + 1 hours)
+        );
+        ConfidentialTokenSwap.ConfidentialTransferSettlement memory transferSettlement =
+            ConfidentialTokenSwap.ConfidentialTransferSettlement({
+                expectedOldStateRoot: depositSettlement.newStateRoot,
+                newStateRoot: keccak256("transfer-root"),
+                senderBalanceDataId: keccak256("sender-after"),
+                receiverBalanceDataId: keccak256("receiver-after"),
+                transcriptRoot: keccak256("transfer-transcript")
+            });
+        swap.finalizeConfidentialTransfer(
+            transferId,
+            transferSettlement,
+            _memberSignatures(swap.confidentialTransferDigest(transferId, transferSettlement))
+        );
+        require(swap.privateLiabilities(address(token)) == 100 ether, "liability changed");
+        require(
+            swap.privateStateRoots(address(token)) == transferSettlement.newStateRoot,
+            "transfer root not applied"
+        );
     }
 
     function _memberSignatures(bytes32 digest) private returns (bytes[] memory signatures) {
