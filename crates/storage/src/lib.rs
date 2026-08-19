@@ -1,4 +1,4 @@
-#![doc = "持久化端口；数据库实现不得记录或打印敏感载荷。"]
+#![doc = "Persistence port; database implementations must never log or print sensitive payloads."]
 
 use ppsc_core::{
     Commitment, CommitteeEpoch, DataId, DataRepresentation, MessageId, NodeId, PublicBytes,
@@ -79,7 +79,7 @@ pub enum FragmentKind {
     DegreeReductionPair,
 }
 
-/// 每个节点只处理发给自己的份额或允许复制的密文。
+/// Each node only handles shares addressed to it or ciphertexts allowed to be replicated.
 pub trait FragmentRepository: Send + Sync {
     fn put_if_newer(
         &self,

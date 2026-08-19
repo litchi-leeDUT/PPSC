@@ -1,37 +1,44 @@
 [package]
-name = "ppsc-node"
+name = "ppsc-fhe"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[build-dependencies]
+cc = "1.0"
+
 [dependencies]
-ark-bn254 = "0.4"
-ark-ff = "0.4"
-ppsc-chain = { path = "../chain" }
 ppsc-core = { path = "../core" }
 ppsc-crypto = { path = "../crypto" }
 ppsc-network = { path = "../network" }
-ppsc-protocol = { path = "../protocol" }
-ppsc-storage = { path = "../storage" }
+ark-ff = "0.4"
+ark-bn254 = "0.4"
 rand = "0.8"
 
 [dev-dependencies]
-ark-bn254 = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+ppsc-node = { path = "../node" }
 
 [[bench]]
-name = "handoff_network"
+name = "conversion"
 harness = false
 
 [[bench]]
-name = "handoff_scaling"
+name = "transfer"
 harness = false
 
 [[bench]]
-name = "hybrid_ablation"
+name = "conversion_network"
+harness = false
+
+[[bench]]
+name = "workloads_e2e"
+harness = false
+
+[[bench]]
+name = "hybrid_ablation_fhe"
 harness = false
 
 [lints]
 workspace = true
-

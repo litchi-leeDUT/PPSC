@@ -1,6 +1,16 @@
 # Workspace-local override for the obsolete USTC git index configured globally
 # on the development machine. Sparse registries are supported by this workspace's
 # minimum Cargo/Rust version and avoid the unavailable legacy endpoint.
+# The global git config sets http.proxy to 127.0.0.1:7897 which cargo falls back
+# to; rsproxy.cn is directly reachable, so disable the proxy here.
+[http]
+proxy = ""
+
+# OpenFHE is built with MinGW64 g++; use g++ as the linker so the full CRT/C++
+# runtime (ucrtbase, stdc++, ...) is pulled in.
+[target.x86_64-pc-windows-gnu]
+linker = "g++"
+
 [source.crates-io]
 replace-with = "rsproxy"
 

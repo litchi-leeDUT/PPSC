@@ -1,4 +1,4 @@
-#![doc = "跨模块稳定领域类型。"]
+#![doc = "Stable cross-module domain types."]
 
 use std::{error::Error, fmt};
 
@@ -91,7 +91,7 @@ impl PublicBytes {
     }
 }
 
-/// 敏感字节容器：故意不实现 `Clone`、`Debug`、`Display`。
+/// Sensitive-byte container: deliberately implements neither `Clone`, `Debug`, nor `Display`.
 pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {

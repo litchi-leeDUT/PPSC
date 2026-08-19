@@ -1,4 +1,6 @@
-#![doc = "传输抽象；gRPC/tonic 实现应放在适配器子模块。"]
+#![doc = "Transport abstraction; gRPC/tonic implementations should live in adapter submodules."]
+
+pub mod memory;
 
 use ppsc_core::{MessageId, NodeId, ProtocolVersion, TaskId};
 use ppsc_protocol::ProtocolMessage;

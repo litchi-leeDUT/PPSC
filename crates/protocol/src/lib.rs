@@ -1,4 +1,6 @@
-#![doc = "与网络和存储实现无关的协议状态机。"]
+#![doc = "Protocol state machine, independent of network and storage implementations."]
+
+pub mod handoff;
 
 use ppsc_core::{
     Commitment, CommitteeEpoch, CommitteeId, ContractId, ConversionDirection, DataId, ExecutionId,

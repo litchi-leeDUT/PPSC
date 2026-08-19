@@ -1,4 +1,4 @@
-#![doc = "密码学能力端口；具体实现必须委托给成熟、经过审计的库。"]
+#![doc = "Cryptographic capability port; concrete implementations must delegate to mature, audited libraries."]
 
 use ppsc_core::{
     Commitment, CommitteeEpoch, CommitteeId, DataId, ExecutionId, NodeId, PublicBytes, SecretBytes,
@@ -6,11 +6,12 @@ use ppsc_core::{
 };
 use std::{error::Error, fmt};
 
+pub mod mpc;
+
 pub struct Ciphertext(pub PublicBytes);
 pub struct Proof(pub PublicBytes);
 pub struct SecretShare(SecretBytes);
 pub struct SortitionProof(pub PublicBytes);
-pub struct HandoffPackage(pub PublicBytes);
 
 pub struct ConversionParameters {
     pub ring_degree: u32,
@@ -93,7 +94,7 @@ pub trait CryptoProvider: Send + Sync {
     fn prove(&self, task_id: TaskId, statement: &[u8]) -> Result<Proof, CryptoError>;
     fn verify(&self, task_id: TaskId, statement: &[u8], proof: &Proof) -> Result<(), CryptoError>;
 
-    /// 使用已承诺的随机种子产生不可伪造的节点入选证明。
+    /// Produce an unforgeable node-selection proof using a committed random seed.
     fn prove_sortition(
         &self,
         execution_id: ExecutionId,
@@ -111,25 +112,6 @@ pub trait CryptoProvider: Send + Sync {
         eligibility_weight: u64,
         proof: &SortitionProof,
     ) -> Result<(), CryptoError>;
-
-    /// 产生发往新委员会成员的重分享包；实现不得重构明文秘密。
-    fn prepare_handoff(
-        &self,
-        execution_id: ExecutionId,
-        from: CommitteeId,
-        to: CommitteeId,
-        local_share: &SecretShare,
-        recipients: &[NodeId],
-    ) -> Result<Vec<HandoffPackage>, CryptoError>;
-
-    /// 组合经认证的重分享包，得到新委员会的本地份额。
-    fn accept_handoff(
-        &self,
-        execution_id: ExecutionId,
-        from: CommitteeId,
-        to: CommitteeId,
-        packages: &[HandoffPackage],
-    ) -> Result<SecretShare, CryptoError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -7,6 +7,38 @@ rust-version.workspace = true
 
 [dependencies]
 ppsc-core = { path = "../core" }
+ark-ff = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+ark-bn254 = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "handoff"
+harness = false
+
+[[bench]]
+name = "multiplication"
+harness = false
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bench]]
+name = "auth"
+harness = false
+
+[[bench]]
+name = "preprocessing"
+harness = false
+
+[[bench]]
+name = "workloads"
+harness = false
 
 [lints]
 workspace = true

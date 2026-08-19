@@ -9,6 +9,10 @@ rust-version.workspace = true
 ppsc-core = { path = "../core" }
 ppsc-crypto = { path = "../crypto" }
 
+[dev-dependencies]
+ark-bn254 = "0.4"
+rand = "0.8"
+
 [lints]
 workspace = true
 

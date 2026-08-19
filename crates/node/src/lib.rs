@@ -1,4 +1,7 @@
-#![doc = "节点应用编排层；所有依赖通过构造函数注入。"]
+#![doc = "Node application orchestration layer; all dependencies are injected via the constructor."]
+
+pub mod comparison_runtime;
+pub mod handoff_runtime;
 
 use ppsc_chain::ChainGateway;
 use ppsc_crypto::CryptoProvider;
@@ -36,7 +39,7 @@ where
         }
     }
 
-    /// 暂为编排入口；事件循环将在适配器选型后实现。
+    /// For now an orchestration entry point; the event loop will be implemented after adapter selection.
     pub async fn run(self) -> Result<(), NodeError> {
         let _components = (
             self.chain,

@@ -4,4 +4,5 @@
 /broadcast
 *.log
 .env
+/openfhe-development
 

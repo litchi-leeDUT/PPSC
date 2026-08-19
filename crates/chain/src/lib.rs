@@ -1,4 +1,4 @@
-#![doc = "链上合约端口；具体 Solidity ABI/RPC 实现在适配器中。"]
+#![doc = "On-chain contract port; concrete Solidity ABI/RPC implementations live in adapters."]
 
 use ppsc_core::{
     Commitment, CommitteeEpoch, CommitteeId, ContractId, DataId, DataRepresentation, ExecutionId,
@@ -48,7 +48,7 @@ pub enum ChainEvent {
     },
 }
 
-/// 链上只保存定位和完整性元数据，不保存秘密份额或解密密钥。
+/// On-chain only location and integrity metadata are stored, never secret shares or decryption keys.
 /// Paper Definition 1: public address-registry entry for one protected value.
 pub struct DataReference {
     pub data_id: DataId,
